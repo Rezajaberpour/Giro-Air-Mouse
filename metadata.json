@@ -1,0 +1,6 @@
+{
+  "name": "Giro Air Mouse",
+  "description": "تبدیل گوشی به موس بی‌سیم با ژیروسکوپ و دکمه‌های ولوم برای ویندوز 10 / Turn your Android phone into an Air Mouse for Windows 10 using Gyroscope and Volume buttons.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
