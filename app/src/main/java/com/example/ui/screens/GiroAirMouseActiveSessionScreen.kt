@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
@@ -44,6 +45,9 @@ import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import com.example.ui.dialogs.NetworkLogsDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -58,6 +62,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -107,6 +112,13 @@ fun GiroAirMouseActiveSessionScreen(
   var webViewRef by remember { mutableStateOf<WebView?>(null) }
   var webViewError by remember { mutableStateOf(false) }
   var showLogsDialog by remember { mutableStateOf(false) }
+  var pinInput by remember(connInfo.pin) { mutableStateOf(connInfo.pin) }
+
+  // Ensure tracking is active and cookies are synced on session start
+  LaunchedEffect(Unit) {
+    viewModel.setAirMouseActive(true)
+    viewModel.syncCookieFromWebView()
+  }
 
   // Handle hardware back button to exit session smoothly
   BackHandler {
@@ -159,6 +171,12 @@ fun GiroAirMouseActiveSessionScreen(
                 if (request?.isForMainFrame == true) {
                   webViewError = true
                 }
+              }
+
+              override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // When webview finishes loading or authenticating, synchronize session cookie to mouse client
+                viewModel.syncCookieFromWebView()
               }
             }
 
@@ -304,16 +322,26 @@ fun GiroAirMouseActiveSessionScreen(
             }
             Spacer(modifier = Modifier.width(6.dp))
             Column {
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                  text = "Giro Air Mouse",
+                  style = MaterialTheme.typography.titleSmall,
+                  fontWeight = FontWeight.Bold,
+                  color = Color.White
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                val isConnected = connInfo.status == ConnectionStatus.CONNECTED
+                Box(
+                  modifier = Modifier
+                    .size(8.dp)
+                    .background(if (isConnected) Color(0xFF00E676) else Color(0xFFFF9100), CircleShape)
+                )
+              }
+              val isConnected = connInfo.status == ConnectionStatus.CONNECTED
               Text(
-                text = "Giro Air Mouse",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-              )
-              Text(
-                text = "${connInfo.serverIp}:${connInfo.serverPort}",
+                text = if (isConnected) "متصل به کامپیوتر (:8620)" else "${connInfo.serverIp}:${connInfo.serverPort} (در انتظار تایید PIN)",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF8B98A5),
+                color = if (isConnected) Color(0xFF00E676) else Color(0xFFFFB74D),
                 fontSize = 11.sp
               )
             }
@@ -368,7 +396,7 @@ fun GiroAirMouseActiveSessionScreen(
           }
         }
 
-        // Expanded HUD controls: Gyro Toggle, Volume Up Indicator, Calibration, Sensitivity
+        // Expanded HUD controls: Gyro Toggle, Volume Up Indicator, Calibration, Sensitivity, Quick PIN
         AnimatedVisibility(visible = isHudExpanded) {
           Column(
             modifier = Modifier
@@ -446,6 +474,43 @@ fun GiroAirMouseActiveSessionScreen(
                   .background(Color(0xFF26303F))
               ) {
                 Icon(Icons.Default.RestartAlt, contentDescription = "کالیبره صفر", tint = Color.White)
+              }
+            }
+
+            // Quick PIN pairing bar if not yet connected
+            if (connInfo.status != ConnectionStatus.CONNECTED) {
+              Row(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .clip(RoundedCornerShape(10.dp))
+                  .background(Color(0xFF1B2330))
+                  .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                  .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+              ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Icon(Icons.Default.Lock, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text("Pairing PIN ویندوز:", color = Color(0xFFB0BEC5), fontSize = 11.sp)
+                  Spacer(modifier = Modifier.width(6.dp))
+                  BasicTextField(
+                    value = pinInput,
+                    onValueChange = { pinInput = it },
+                    textStyle = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold),
+                    cursorBrush = SolidColor(CyberCyan),
+                    singleLine = true,
+                    modifier = Modifier.width(65.dp)
+                  )
+                }
+                Button(
+                  onClick = { viewModel.pairWithPin(pinInput) },
+                  colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
+                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                  shape = RoundedCornerShape(8.dp)
+                ) {
+                  Text("اتصال مجدد", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
               }
             }
 

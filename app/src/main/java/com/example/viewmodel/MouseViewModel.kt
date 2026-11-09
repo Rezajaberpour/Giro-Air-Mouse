@@ -157,6 +157,11 @@ class MouseViewModel(application: Application) : AndroidViewModel(application) {
     _connectionInfo.value = _connectionInfo.value.copy(pin = cleanPin)
   }
 
+  fun updatePinAndReconnect(pin: String) {
+    updatePin(pin)
+    connect(_connectionInfo.value.rawAddress, pin)
+  }
+
   fun connect(rawAddress: String, pin: String = "", portOverride: Int? = null) {
     val cleanAddress = rawAddress.trim()
     val (host, defaultPort) = mouseClient.parseAddress(cleanAddress)
@@ -261,6 +266,25 @@ class MouseViewModel(application: Application) : AndroidViewModel(application) {
 
   fun clearNetworkLogs() {
     mouseClient.clearLogs()
+  }
+
+  fun syncCookieFromWebView() {
+    val synced = mouseClient.syncCookieFromWebView()
+    if (synced) {
+      _isAirMouseActive.value = true
+      gyroManager.isTrackingActive = true
+    }
+  }
+
+  fun pairWithPin(pin: String) {
+    updatePin(pin)
+    viewModelScope.launch {
+      val success = mouseClient.authenticateWithPin(_connectionInfo.value.serverIp, _connectionInfo.value.serverPort, pin)
+      if (success) {
+        _isAirMouseActive.value = true
+        gyroManager.isTrackingActive = true
+      }
+    }
   }
 
   fun runNetworkDiagnostics() {

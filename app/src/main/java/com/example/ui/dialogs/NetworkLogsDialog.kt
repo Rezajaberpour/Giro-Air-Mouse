@@ -24,6 +24,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
@@ -42,17 +45,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,10 +63,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,14 +78,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.model.ConnectionStatus
 import com.example.model.LogLevel
 import com.example.model.NetworkLogEntry
-import com.example.ui.theme.AccentGreen
-import com.example.ui.theme.AccentOrange
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.DarkBackground
-import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.DarkSurfaceVariant
-import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.viewmodel.MouseViewModel
 
@@ -103,9 +99,14 @@ fun NetworkLogsDialog(
   val context = LocalContext.current
 
   var selectedFilter by remember { mutableStateOf(LogFilter.ALL) }
+  var pinEdit by remember(connInfo.pin) { mutableStateOf(connInfo.pin) }
 
   val errorCount = remember(logs) { logs.count { it.level == LogLevel.ERROR } }
   val warnCount = remember(logs) { logs.count { it.level == LogLevel.WARN } }
+  val is401Error = remember(logs, connInfo.lastError) {
+    (connInfo.lastError?.contains("401") == true) ||
+    logs.any { it.message.contains("401") || it.details?.contains("401") == true }
+  }
 
   val filteredLogs = remember(logs, selectedFilter) {
     when (selectedFilter) {
@@ -125,15 +126,15 @@ fun NetworkLogsDialog(
       color = Color(0xFF10151E),
       border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF243042)),
       modifier = Modifier
-        .fillMaxWidth(0.95f)
-        .fillMaxHeight(0.9f)
-        .padding(8.dp)
+        .fillMaxWidth(0.96f)
+        .fillMaxHeight(0.94f)
+        .padding(6.dp)
         .testTag("network_logs_dialog")
     ) {
       Column(
         modifier = Modifier
           .fillMaxSize()
-          .padding(16.dp)
+          .padding(14.dp)
       ) {
         // 1. Header Row
         Row(
@@ -165,7 +166,7 @@ fun NetworkLogsDialog(
                 color = Color.White
               )
               Text(
-                text = "بررسی علت عدم اتصال به ویندوز",
+                text = "علت عدم اتصال به ویندوز و رفع خطای ۴۰۱",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF8B98A5),
                 fontSize = 11.sp
@@ -178,7 +179,7 @@ fun NetworkLogsDialog(
           }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         // 2. Status & Diagnostic Summary Card
         Card(
@@ -188,6 +189,7 @@ fun NetworkLogsDialog(
           modifier = Modifier.fillMaxWidth()
         ) {
           Column(modifier = Modifier.padding(12.dp)) {
+            // Host & Status Row
             Row(
               modifier = Modifier.fillMaxWidth(),
               horizontalArrangement = Arrangement.SpaceBetween,
@@ -236,6 +238,7 @@ fun NetworkLogsDialog(
               }
             }
 
+            // Error Message (if any)
             if (connInfo.lastError != null) {
               Spacer(modifier = Modifier.height(8.dp))
               Row(verticalAlignment = Alignment.CenterVertically) {
@@ -255,37 +258,150 @@ fun NetworkLogsDialog(
               }
             }
 
+            // 401 Explanation Alert Box
+            if (is401Error) {
+              Spacer(modifier = Modifier.height(10.dp))
+              Surface(
+                color = Color(0xFF2D1619),
+                shape = RoundedCornerShape(8.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFB71C1C)),
+                modifier = Modifier.fillMaxWidth()
+              ) {
+                Row(
+                  modifier = Modifier.padding(10.dp),
+                  verticalAlignment = Alignment.Top
+                ) {
+                  Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = Color(0xFFFF8A80),
+                    modifier = Modifier.size(18.dp)
+                  )
+                  Spacer(modifier = Modifier.width(8.dp))
+                  Column {
+                    Text(
+                      text = "خطای احراز هویت (401 Unauthorized):",
+                      fontSize = 12.sp,
+                      fontWeight = FontWeight.Bold,
+                      color = Color(0xFFFF8A80)
+                    )
+                    Text(
+                      text = "کد Pairing PIN وارد شده با پنجره WinDock در ویندوز مطابقت ندارد. اگر نرم‌افزار را در ویندوز بسته و دوباره باز کرده‌اید، کد ۶ رقمی جدیدی ایجاد شده است. لطفاً کد ۶ رقمی جدید را در کادر زیر وارد کنید:",
+                      fontSize = 11.sp,
+                      color = Color(0xFFFFCDD2),
+                      lineHeight = 16.sp
+                    )
+                  }
+                }
+              }
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Action Buttons: Run Test, Reconnect, Copy, Clear
+            // Pairing PIN Editor Section
+            Surface(
+              color = Color(0xFF101622),
+              shape = RoundedCornerShape(8.dp),
+              border = androidx.compose.foundation.BorderStroke(1.dp, if (is401Error) Color(0xFFEF5350) else Color(0xFF253346)),
+              modifier = Modifier.fillMaxWidth()
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+              ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Icon(
+                    Icons.Default.Lock,
+                    contentDescription = null,
+                    tint = Color(0xFF4DB6AC),
+                    modifier = Modifier.size(16.dp)
+                  )
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text(
+                    text = "Pairing PIN:",
+                    color = Color(0xFFB0BEC5),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                  )
+                  Spacer(modifier = Modifier.width(8.dp))
+                  BasicTextField(
+                    value = pinEdit,
+                    onValueChange = {
+                      pinEdit = it.trim()
+                      viewModel.updatePin(it.trim())
+                    },
+                    textStyle = TextStyle(
+                      color = Color.White,
+                      fontSize = 16.sp,
+                      fontWeight = FontWeight.Bold,
+                      fontFamily = FontFamily.Monospace,
+                      textAlign = TextAlign.Center
+                    ),
+                    cursorBrush = SolidColor(Color(0xFF4DB6AC)),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                      .width(80.dp)
+                      .clip(RoundedCornerShape(4.dp))
+                      .background(Color(0xFF1D2635))
+                      .padding(horizontal = 6.dp, vertical = 4.dp)
+                      .testTag("dialog_pin_edit_input")
+                  )
+                }
+
+                Button(
+                  onClick = {
+                    viewModel.updatePinAndReconnect(pinEdit)
+                  },
+                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+                  shape = RoundedCornerShape(6.dp),
+                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                  Text("ثبت و اتصال", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+              }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Action Buttons: Row 1 (Reconnect, Socket Test)
             Row(
               modifier = Modifier.fillMaxWidth(),
               horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
               Button(
-                onClick = { viewModel.runNetworkDiagnostics() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B)),
+                onClick = { viewModel.updatePinAndReconnect(pinEdit) },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
                 shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 modifier = Modifier.weight(1f)
               ) {
-                Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("تست سوکت", fontSize = 12.sp)
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("اتصال مجدد", fontSize = 12.sp, fontWeight = FontWeight.Bold)
               }
 
               Button(
-                onClick = { viewModel.connect(connInfo.rawAddress, connInfo.pin) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+                onClick = { viewModel.runNetworkDiagnostics() },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B)),
                 shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 modifier = Modifier.weight(1f)
               ) {
-                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("اتصال مجدد", fontSize = 12.sp)
+                Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("تست سوکت", fontSize = 12.sp, fontWeight = FontWeight.Bold)
               }
+            }
 
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Action Buttons: Row 2 (Copy Logs, Clear Logs)
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
               OutlinedButton(
                 onClick = {
                   val allText = logs.joinToString("\n") {
@@ -297,28 +413,34 @@ fun NetworkLogsDialog(
                   Toast.makeText(context, "لاگ‌ها کپی شدند", Toast.LENGTH_SHORT).show()
                 },
                 shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                modifier = Modifier.weight(1f)
               ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "کپی لاگ‌ها", tint = Color.White, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("کپی لاگ‌ها", fontSize = 11.sp, color = Color.White)
               }
 
               OutlinedButton(
                 onClick = { viewModel.clearNetworkLogs() },
                 shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                modifier = Modifier.weight(1f)
               ) {
-                Icon(Icons.Default.DeleteSweep, contentDescription = "پاکسازی", tint = Color(0xFFEF5350), modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("پاکسازی لاگ", fontSize = 11.sp, color = Color(0xFFEF5350))
               }
             }
           }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // 3. Filter Chips
         Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp)
+          horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
           FilterChip(
             selected = selectedFilter == LogFilter.ALL,
@@ -367,7 +489,7 @@ fun NetworkLogsDialog(
           )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         // 4. Logs List
         if (filteredLogs.isEmpty()) {
@@ -378,12 +500,12 @@ fun NetworkLogsDialog(
             contentAlignment = Alignment.Center
           ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-              Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF607286), modifier = Modifier.size(40.dp))
-              Spacer(modifier = Modifier.height(8.dp))
+              Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF607286), modifier = Modifier.size(36.dp))
+              Spacer(modifier = Modifier.height(6.dp))
               Text(
                 text = "هنوز لاگی در این بخش ثبت نشده است.",
                 color = Color(0xFF8899A6),
-                fontSize = 13.sp
+                fontSize = 12.sp
               )
               Spacer(modifier = Modifier.height(4.dp))
               Text(

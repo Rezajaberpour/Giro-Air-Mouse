@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Warning
 import com.example.model.ConnectionMode
 import com.example.model.LogLevel
 import com.example.ui.dialogs.NetworkLogsDialog
@@ -376,9 +377,13 @@ fun GiroAirMouseConnectScreen(
       if (connInfo.lastError != null || networkLogs.any { it.level == LogLevel.ERROR }) {
         Spacer(modifier = Modifier.height(14.dp))
         val firstError = networkLogs.firstOrNull { it.level == LogLevel.ERROR }
+        val is401 = connInfo.lastError?.contains("401") == true ||
+          (firstError?.message?.contains("401") == true) ||
+          (firstError?.details?.contains("401") == true)
+
         Card(
-          colors = CardDefaults.cardColors(containerColor = Color(0xFF2B1419)),
-          border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF9E2A36)),
+          colors = CardDefaults.cardColors(containerColor = if (is401) Color(0xFF331518) else Color(0xFF2B1419)),
+          border = androidx.compose.foundation.BorderStroke(1.dp, if (is401) Color(0xFFE53935) else Color(0xFF9E2A36)),
           shape = RoundedCornerShape(10.dp),
           modifier = Modifier
             .fillMaxWidth(0.92f)
@@ -395,21 +400,21 @@ fun GiroAirMouseConnectScreen(
               modifier = Modifier.weight(1f)
             ) {
               Icon(
-                Icons.Default.Error,
+                imageVector = if (is401) Icons.Default.Warning else Icons.Default.Error,
                 contentDescription = null,
-                tint = Color(0xFFFF5252),
+                tint = if (is401) Color(0xFFFF7043) else Color(0xFFFF5252),
                 modifier = Modifier.size(20.dp)
               )
               Spacer(modifier = Modifier.width(8.dp))
               Column {
                 Text(
-                  text = "خطای سوکت در اتصال به کامپیوتر",
+                  text = if (is401) "خطای ۴۰۱: رمز Pairing PIN با ویندوز تطابق ندارد" else "خطای سوکت در اتصال به کامپیوتر",
                   color = Color(0xFFFFCDD2),
                   fontSize = 12.sp,
                   fontWeight = FontWeight.Bold
                 )
                 Text(
-                  text = connInfo.lastError ?: (firstError?.message ?: "برای عیب‌یابی و راهنما کلیک کنید"),
+                  text = if (is401) "کد ۶ رقمی جدید نمایش‌داده‌شده در پنجره WinDock ویندوز را وارد کنید" else (connInfo.lastError ?: (firstError?.message ?: "برای عیب‌یابی و راهنما کلیک کنید")),
                   color = Color(0xFFEF9A9A),
                   fontSize = 11.sp,
                   maxLines = 1
@@ -423,7 +428,7 @@ fun GiroAirMouseConnectScreen(
               shape = RoundedCornerShape(6.dp),
               contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
             ) {
-              Text("بررسی لاگ", fontSize = 11.sp)
+              Text(if (is401) "اصلاح PIN" else "بررسی لاگ", fontSize = 11.sp)
             }
           }
         }

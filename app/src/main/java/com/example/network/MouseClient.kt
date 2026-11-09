@@ -114,9 +114,14 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
   private fun getDiagnosticHint(e: Throwable?, responseCode: Int? = null): String {
     val msg = e?.message ?: ""
     return when {
-      responseCode == 403 -> "ویندوز درخواست را به دلیل هدر Origin یا دسترسی رد کرد (HTTP 403 Forbidden)."
-      responseCode == 401 -> "رمز Pairing PIN تایید نشد یا اشتباه است (HTTP 401 Unauthorized)."
-      responseCode == 404 -> "مسیر وب‌سوکت /input روی سرور ویندوز پیدا نشد (HTTP 404 Not Found)."
+      responseCode == 403 || msg.contains("403", ignoreCase = true) ->
+        "ویندوز درخواست را به دلیل هدر Origin یا دسترسی رد کرد (HTTP 403 Forbidden)."
+      responseCode == 401 || msg.contains("401", ignoreCase = true) ->
+        "خطای احراز هویت (401 Unauthorized): رمز Pairing PIN اشتباه است یا با کد ۶ رقمی پنجره ویندوز مطابقت ندارد. پنجره برنامه را در کامپیوتر باز کرده و کد ۶ رقمی Pairing PIN فعلی را بررسی و وارد کنید."
+      responseCode == 429 || msg.contains("429", ignoreCase = true) ->
+        "به دلیل ۵ تلاش ناموفق، سیستم برای ۶۰ ثانیه قفل شده است. لطفاً یک دقیقه صبر کرده و سپس مجدداً تلاش کنید."
+      responseCode == 404 || msg.contains("404", ignoreCase = true) ->
+        "مسیر وب‌سوکت /input روی سرور ویندوز پیدا نشد (HTTP 404 Not Found)."
       msg.contains("ECONNREFUSED", ignoreCase = true) || msg.contains("Connection refused", ignoreCase = true) ->
         "کامپیوتر ارتباط را رد کرد (Connection refused). مطمئن شوید برنامه روی ویندوز ۱۰ باز است و پورت $currentPort فعال است."
       msg.contains("EHOSTUNREACH", ignoreCase = true) || msg.contains("No route to host", ignoreCase = true) ->
@@ -158,6 +163,10 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
     }
   }
 
+  // Sub-pixel delta accumulation for smooth integer streaming to WinDock
+  private var accumulatedDx: Float = 0f
+  private var accumulatedDy: Float = 0f
+
   @Synchronized
   fun connect(rawAddress: String, pin: String = "", forcedPort: Int? = null) {
     disconnect()
@@ -182,12 +191,23 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
       // Step 1: Probe TCP reachability on the port
       val tcpOk = probeTcpSocket(currentHost, currentPort)
 
-      // Step 2: Optional PIN verification with PC if PIN provided
-      if (currentPin.isNotEmpty()) {
-        authenticateWithPin(currentHost, currentPort, currentPin)
+      // Step 2: Check if cookie already exists in WebView CookieManager or authenticate via PIN
+      val existingCookie = extractCookieFromStorage(currentHost, currentPort)
+      if (existingCookie != null) {
+        sessionCookie = existingCookie
+        log(LogLevel.SUCCESS, "Auth", "کوکی نشست معتبر در حافظه یافت شد.")
+      } else if (currentPin.isNotEmpty()) {
+        val authOk = authenticateWithPin(currentHost, currentPort, currentPin)
+        if (!authOk) {
+          log(
+            LogLevel.WARN,
+            "Connect",
+            "کد Pairing PIN توسط ویندوز تایید نشد (۴۰۱). در صورت تغییر PIN در ویندوز، کد ۶ رقمی جدید را وارد فرمایید."
+          )
+        }
       }
 
-      // Step 3: Connect Giro Air Mouse WebSocket
+      // Step 3: Connect Giro Air Mouse WebSocket to /input
       connectGiroAirMouseWebSocket(currentHost, currentPort)
 
       // Step 4: Connect low-latency UDP socket alongside
@@ -195,6 +215,38 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
 
       startPinging()
     }
+  }
+
+  private fun extractCookieFromStorage(host: String, port: Int): String? {
+    try {
+      val cookieManager = android.webkit.CookieManager.getInstance()
+      val urlHttp = "http://$host:$port"
+      val rawCookies = cookieManager.getCookie(urlHttp)
+      if (!rawCookies.isNullOrEmpty()) {
+        for (part in rawCookies.split(";")) {
+          val clean = part.trim()
+          if (clean.startsWith("windock_session=") || clean.startsWith("__Host-windock_session=")) {
+            return clean
+          }
+        }
+      }
+    } catch (_: Exception) {}
+    return sessionCookie
+  }
+
+  fun syncCookieFromWebView(): Boolean {
+    val cookie = extractCookieFromStorage(currentHost, currentPort)
+    if (cookie != null && cookie != sessionCookie) {
+      sessionCookie = cookie
+      log(LogLevel.SUCCESS, "CookieSync", "کوکی نشست ویندوز از مرورگر داخلی همگام‌سازی شد.")
+      if (!isWsConnected) {
+        coroutineScope.launch(Dispatchers.IO) {
+          connectGiroAirMouseWebSocket(currentHost, currentPort)
+        }
+      }
+      return true
+    }
+    return false
   }
 
   private fun probeTcpSocket(host: String, port: Int): Boolean {
@@ -220,71 +272,139 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
     }
   }
 
-  private fun authenticateWithPin(host: String, port: Int, pin: String) {
+  fun authenticateWithPin(host: String, port: Int, pin: String): Boolean {
+    val cleanPin = pin.trim()
+    if (cleanPin.isEmpty()) {
+      log(
+        LogLevel.WARN,
+        "HTTP-Auth",
+        "کد Pairing PIN وارد نشده است. در صورت نیاز کد ۶ رقمی پنجره ویندوز را وارد کنید."
+      )
+      return false
+    }
+
     try {
-      log(LogLevel.INFO, "HTTP-Auth", "ارسال درخواست اعتبارسنجی Pairing PIN به http://$host:$port/api/auth...")
-      val json = "{\"pin\":\"$pin\"}"
+      log(LogLevel.INFO, "HTTP-Auth", "ارسال درخواست احراز هویت با PIN ($cleanPin) به http://$host:$port/api/auth...")
+      val json = "{\"pin\":\"$cleanPin\"}"
       val body = json.toRequestBody("application/json; charset=utf-8".toMediaType())
       val request = Request.Builder()
         .url("http://$host:$port/api/auth")
         .addHeader("Origin", "http://$host:$port")
+        .addHeader("Host", "$host:$port")
         .post(body)
         .build()
 
       val response = httpClient.newCall(request).execute()
       val code = response.code
-      val cookie = response.header("Set-Cookie")
-      if (cookie != null) {
-        sessionCookie = cookie
-      }
+      val respBody = response.body?.string() ?: ""
 
       if (response.isSuccessful) {
-        log(LogLevel.SUCCESS, "HTTP-Auth", "احراز هویت موفق با PIN (کد HTTP $code)")
-      } else {
+        val setCookieHeaders = response.headers("Set-Cookie")
+        var sessionTokenFound = false
+        for (sc in setCookieHeaders) {
+          val cookieClean = sc.substringBefore(";").trim()
+          if (cookieClean.contains("windock_session")) {
+            sessionCookie = cookieClean
+            sessionTokenFound = true
+            break
+          }
+        }
+        if (!sessionTokenFound && setCookieHeaders.isNotEmpty()) {
+          sessionCookie = setCookieHeaders[0].substringBefore(";").trim()
+        }
+
+        // Also inject into Android WebView CookieManager
+        try {
+          val cookieManager = android.webkit.CookieManager.getInstance()
+          cookieManager.setAcceptCookie(true)
+          cookieManager.setCookie("http://$host:$port", sessionCookie ?: "")
+          cookieManager.flush()
+        } catch (_: Exception) {}
+
         log(
-          LogLevel.WARN,
+          LogLevel.SUCCESS,
           "HTTP-Auth",
-          "پاسخ رد احراز هویت PIN (کد HTTP $code): ${response.message}",
-          diagnosticHint = getDiagnosticHint(null, code)
+          "احراز هویت موفق با PIN (کد HTTP 200). کوکی نشست ویندوز دریافت شد."
         )
+        response.close()
+
+        // Reconnect WebSocket if needed
+        if (!isWsConnected) {
+          connectGiroAirMouseWebSocket(host, port)
+        }
+        return true
+      } else {
+        val hint = when {
+          code == 401 -> "رمز Pairing PIN اشتباه است! لطفاً کد ۶ رقمی فعلی نمایش‌داده‌شده در پنجره کامپیوتر را بررسی و وارد کنید."
+          code == 429 -> "به دلیل ۵ تلاش اشتباه، ورود به مدت ۶۰ ثانیه قفل شده است. لطفاً یک دقیقه صبر کرده و مجدداً تلاش کنید."
+          code == 400 -> "کد PIN باید دقیقاً یک عدد ۶ رقمی باشد."
+          code == 403 -> "ویندوز درخواست را رد کرد (خطای Origin یا Host)."
+          else -> "پاسخ خطای HTTP $code از سرور ویندوز: $respBody"
+        }
+        log(
+          LogLevel.ERROR,
+          "HTTP-Auth",
+          "رد احراز هویت با کد PIN (HTTP $code): $respBody",
+          details = respBody,
+          diagnosticHint = hint
+        )
+        _lastError.value = if (code == 401) "کد PIN اشتباه است (۴۰۱)" else "خطای احراز هویت (HTTP $code)"
+        response.close()
+        return false
       }
-      response.close()
     } catch (e: Exception) {
       log(
-        LogLevel.WARN,
+        LogLevel.ERROR,
         "HTTP-Auth",
         "خطای شبکه در درخواست احراز هویت PIN: ${e.message}",
         details = e.message,
         diagnosticHint = getDiagnosticHint(e)
       )
+      return false
     }
   }
 
-  private fun connectGiroAirMouseWebSocket(host: String, port: Int) {
+  fun connectGiroAirMouseWebSocket(host: String, port: Int) {
     try {
+      // Close previous socket if open
+      try {
+        webSocket?.close(1000, "Reconnecting")
+      } catch (_: Exception) {}
+      webSocket = null
+      isWsConnected = false
+
       val wsUrl = "ws://$host:$port/input"
-      log(LogLevel.INFO, "WebSocket", "در حال برقراری ارتباط با وب‌سوکت $wsUrl (Origin: http://$host:$port)...")
+      log(LogLevel.INFO, "WebSocket", "در حال برقراری ارتباط با سوکت ورودی $wsUrl...")
 
       val reqBuilder = Request.Builder()
         .url(wsUrl)
         .addHeader("Origin", "http://$host:$port")
-      sessionCookie?.let {
-        reqBuilder.addHeader("Cookie", it)
+        .addHeader("Host", "$host:$port")
+
+      // Extract cookie if available
+      val cookie = sessionCookie ?: extractCookieFromStorage(host, port)
+      if (cookie != null) {
+        val cleanCookie = cookie.substringBefore(";").trim()
+        reqBuilder.addHeader("Cookie", cleanCookie)
       }
 
       webSocket = httpClient.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-          log(LogLevel.SUCCESS, "WebSocket", "سوکت وب با موفقیت به /input متصل شد (HTTP ${response.code})")
+          log(LogLevel.SUCCESS, "WebSocket", "سوکت وب ورودی متصل شد (HTTP ${response.code}). در انتظار تایید ready...")
           this@MouseClient.webSocket = webSocket
-          isWsConnected = true
-          _status.value = ConnectionStatus.CONNECTED
-          _activeProtocolName.value = "Giro Air Mouse (WebSocket :$port)"
+          // Note: WinDock confirms session readiness with {"type":"ready"} message
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
           Log.d(TAG, "WS message: $text")
-          if (text.contains("pong") || text.contains("ok")) {
+          if (text.contains("\"ready\"")) {
+            isWsConnected = true
             _status.value = ConnectionStatus.CONNECTED
+            _lastError.value = null
+            _activeProtocolName.value = "Giro Air Mouse (:8620)"
+            log(LogLevel.SUCCESS, "WebSocket", "کانال ورودی ماوس با کامپیوتر کاملاً فعال و آماده شد (Ready ✓)")
+          } else if (text.contains("\"error\"")) {
+            log(LogLevel.WARN, "WebSocket", "پیام وضعیت از کامپیوتر: $text")
           }
         }
 
@@ -294,17 +414,15 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
           log(
             LogLevel.ERROR,
             "WebSocket",
-            "خطای اتصال سوکت وب روی /input: $errDesc",
+            "خطای اتصال سوکت ورودی /input: $errDesc",
             details = t.toString(),
             diagnosticHint = hint
           )
           isWsConnected = false
-          // If WS fails, try root WS fallback
-          tryFallbackRootWebSocket(host, port)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-          log(LogLevel.WARN, "WebSocket", "سوکت وب بسته شد (کد: $code, علت: $reason)")
+          log(LogLevel.WARN, "WebSocket", "سوکت بسته شد (کد: $code, علت: $reason)")
           isWsConnected = false
         }
       })
@@ -312,67 +430,29 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
       log(
         LogLevel.ERROR,
         "WebSocket",
-        "خطا در ایجاد درخواست سوکت وب: ${e.message}",
+        "خطا در ایجاد درخواست سوکت: ${e.message}",
         details = e.message,
         diagnosticHint = getDiagnosticHint(e)
       )
-      tryFallbackRootWebSocket(host, port)
-    }
-  }
-
-  private fun tryFallbackRootWebSocket(host: String, port: Int) {
-    try {
-      val fallbackUrl = "ws://$host:$port/"
-      log(LogLevel.INFO, "WS-Fallback", "تلاش برای اتصال ثانویه به ریشه سوکت $fallbackUrl...")
-
-      val reqBuilder = Request.Builder()
-        .url(fallbackUrl)
-        .addHeader("Origin", "http://$host:$port")
-      sessionCookie?.let {
-        reqBuilder.addHeader("Cookie", it)
-      }
-      val ws = httpClient.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-          log(LogLevel.SUCCESS, "WS-Fallback", "سوکت وب ریشه متصل شد (HTTP ${response.code})")
-          this@MouseClient.webSocket = webSocket
-          isWsConnected = true
-          _status.value = ConnectionStatus.CONNECTED
-          _activeProtocolName.value = "Giro Air Mouse (WebSocket :$port)"
-        }
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-          log(
-            LogLevel.ERROR,
-            "WS-Fallback",
-            "خطای اتصال به سوکت وب ریشه: ${response?.code ?: ""} ${t.message}",
-            details = t.message,
-            diagnosticHint = getDiagnosticHint(t, response?.code)
-          )
-          isWsConnected = false
-        }
-      })
-      webSocket = ws
-    } catch (e: Exception) {
-      log(LogLevel.ERROR, "WS-Fallback", "خطا در فال‌بک وب‌سوکت: ${e.message}", details = e.message)
     }
   }
 
   private fun connectUdpSocket(host: String, port: Int) {
     try {
-      log(LogLevel.INFO, "UDP-Socket", "در حال آماده‌سازی سوکت UDP برای کنترل مستقیم ماوس روی پورت $port...")
+      log(LogLevel.INFO, "UDP-Socket", "آماده‌سازی سوکت UDP برای کنترل مکمل ماوس روی پورت $port...")
       val s = DatagramSocket()
       s.soTimeout = 2000
       val addr = InetAddress.getByName(host)
       udpSocket = s
       targetAddress = addr
 
-      log(LogLevel.SUCCESS, "UDP-Socket", "سوکت UDP باز شد (Local Port: ${s.localPort} -> Remote: $addr:$port)")
+      log(LogLevel.SUCCESS, "UDP-Socket", "سوکت UDP باز شد (Local: ${s.localPort} -> Remote: $addr:$port)")
       startUdpReceiving(s)
 
       // Send initial UDP probe
       val pingBytes = "PING:${System.currentTimeMillis()}".toByteArray()
       s.send(DatagramPacket(pingBytes, pingBytes.size, addr, port))
       _packetsSent.value++
-      log(LogLevel.INFO, "UDP-Ping", "پکت تست UDP به $addr:$port ارسال شد.")
     } catch (e: Exception) {
       val hint = getDiagnosticHint(e)
       log(
@@ -407,72 +487,109 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
     udpSocket = null
     targetAddress = null
 
+    accumulatedDx = 0f
+    accumulatedDy = 0f
+
     _status.value = ConnectionStatus.DISCONNECTED
     log(LogLevel.INFO, "Disconnect", "ارتباط با کامپیوتر قطع شد.")
   }
 
+  /**
+   * Send gyroscope / pointer delta movement.
+   * WinDock validation strictly requires integer values: {"type":"move","dx":int,"dy":int}
+   * Fractional components are accumulated and preserved for high-precision smooth control.
+   */
   fun sendMove(dx: Float, dy: Float) {
     if (udpSocket == null && !isWsConnected) return
 
-    // 1. Send via WebSocket (JSON format)
-    if (isWsConnected) {
-      val json = "{\"type\":\"move\",\"dx\":%.2f,\"dy\":%.2f}".format(dx, dy)
-      webSocket?.send(json)
-      _packetsSent.value++
-    }
+    accumulatedDx += dx
+    accumulatedDy += dy
 
-    // 2. Also send via UDP socket (low-latency direct stream)
-    sendUdpPacket("M:%.2f:%.2f".format(dx, dy))
+    val intDx = accumulatedDx.toInt()
+    val intDy = accumulatedDy.toInt()
+
+    if (intDx != 0 || intDy != 0) {
+      accumulatedDx -= intDx
+      accumulatedDy -= intDy
+
+      val clampedDx = intDx.coerceIn(-2048, 2048)
+      val clampedDy = intDy.coerceIn(-2048, 2048)
+
+      // 1. Send via WebSocket (Strict WinDock integer JSON protocol)
+      if (isWsConnected) {
+        val json = "{\"type\":\"move\",\"dx\":$clampedDx,\"dy\":$clampedDy}"
+        webSocket?.send(json)
+        _packetsSent.value++
+      }
+
+      // 2. Also send via UDP socket
+      sendUdpPacket("M:$clampedDx:$clampedDy")
+    }
   }
 
+  /**
+   * Send Mouse Button Down.
+   * WinDock schema: {"type":"button","button":"left"|"right","down":true}
+   */
   fun sendMouseDown(button: String) {
-    val btnName = if (button == "L") "left" else if (button == "R") "right" else "middle"
+    val btn = if (button == "R") "right" else "left"
 
-    // WebSocket format
     if (isWsConnected) {
-      webSocket?.send("{\"type\":\"down\",\"button\":\"$btnName\"}")
+      webSocket?.send("{\"type\":\"button\",\"button\":\"$btn\",\"down\":true}")
       _packetsSent.value++
     }
 
-    // UDP format
     sendUdpPacket("MD:$button")
   }
 
+  /**
+   * Send Mouse Button Up.
+   * WinDock schema: {"type":"button","button":"left"|"right","down":false}
+   */
   fun sendMouseUp(button: String) {
-    val btnName = if (button == "L") "left" else if (button == "R") "right" else "middle"
+    val btn = if (button == "R") "right" else "left"
 
-    // WebSocket format
     if (isWsConnected) {
-      webSocket?.send("{\"type\":\"up\",\"button\":\"$btnName\"}")
+      webSocket?.send("{\"type\":\"button\",\"button\":\"$btn\",\"down\":false}")
       _packetsSent.value++
     }
 
-    // UDP format
     sendUdpPacket("MU:$button")
   }
 
+  /**
+   * Send complete Mouse Click (Down followed by Up).
+   */
   fun sendClick(button: String) {
-    val btnName = if (button == "L") "left" else if (button == "R") "right" else "middle"
+    val btn = if (button == "R") "right" else "left"
 
-    // WebSocket format
     if (isWsConnected) {
-      webSocket?.send("{\"type\":\"click\",\"button\":\"$btnName\"}")
+      webSocket?.send("{\"type\":\"button\",\"button\":\"$btn\",\"down\":true}")
       _packetsSent.value++
+      coroutineScope.launch(Dispatchers.IO) {
+        delay(40)
+        webSocket?.send("{\"type\":\"button\",\"button\":\"$btn\",\"down\":false}")
+        _packetsSent.value++
+      }
     }
 
-    // UDP format
     sendUdpPacket("C:$button")
   }
 
+  /**
+   * Send Wheel Scroll.
+   * WinDock schema: {"type":"scroll","dx":0,"dy":int}
+   */
   fun sendScroll(amount: Float) {
-    // WebSocket format
+    val intAmount = amount.toInt().coerceIn(-2048, 2048)
+    if (intAmount == 0) return
+
     if (isWsConnected) {
-      webSocket?.send("{\"type\":\"scroll\",\"dx\":0,\"dy\":%.2f}".format(amount))
+      webSocket?.send("{\"type\":\"scroll\",\"dx\":0,\"dy\":$intAmount}")
       _packetsSent.value++
     }
 
-    // UDP format
-    sendUdpPacket("S:%.2f".format(amount))
+    sendUdpPacket("S:$intAmount")
   }
 
   private fun sendUdpPacket(msg: String) {
@@ -498,13 +615,17 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
     }
   }
 
+  /**
+   * Keep-alive heartbeat: WinDock terminates the session if no packet is received for 2000ms.
+   * Exact ping schema: {"type":"ping"} with no extra parameters.
+   */
   private fun startPinging() {
     pingJob?.cancel()
     pingJob = coroutineScope.launch(Dispatchers.IO) {
       while (isActive) {
         try {
           if (isWsConnected) {
-            webSocket?.send("{\"type\":\"ping\",\"time\":${System.currentTimeMillis()}}")
+            webSocket?.send("{\"type\":\"ping\"}")
           }
 
           val s = udpSocket
@@ -515,7 +636,7 @@ class MouseClient(private val coroutineScope: CoroutineScope) {
             s.send(DatagramPacket(msg, msg.size, addr, targetPort))
           }
         } catch (_: Exception) {}
-        delay(1500)
+        delay(700) // Keep-alive interval well inside 2000ms lease
       }
     }
   }

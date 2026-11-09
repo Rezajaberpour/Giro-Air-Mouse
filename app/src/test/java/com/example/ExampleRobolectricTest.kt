@@ -80,4 +80,23 @@ class ExampleRobolectricTest {
     viewModel.clearNetworkLogs()
     assertEquals(0, viewModel.networkLogs.value.size)
   }
+
+  @Test
+  fun testWinDockInputProtocolAndCookieSync() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val viewModel = MouseViewModel(app)
+
+    // Test mouse moves and click events
+    viewModel.onTrackpadMove(5.2f, -3.8f)
+    viewModel.onLeftClick()
+    viewModel.onRightClick()
+    viewModel.onScrollWheel(2.0f)
+
+    // Test cookie sync
+    viewModel.syncCookieFromWebView()
+
+    // Test PIN update and pair
+    viewModel.pairWithPin("136460")
+    assertEquals("136460", viewModel.connectionInfo.value.pin)
+  }
 }
